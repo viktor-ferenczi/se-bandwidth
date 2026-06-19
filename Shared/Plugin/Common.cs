@@ -17,13 +17,21 @@ public static class Common
 
     public static void SetPlugin(ICommonPlugin plugin, string gameVersion, string storageDir)
     {
-        Plugin = plugin;
-        Logger = plugin.Log;
-        Config = plugin.Config;
+        AttachPlugin(plugin);
 
         GameVersion = gameVersion;
         DataDir = Path.Combine(storageDir, "Bandwidth");
 
         PatchHelpers.Configure();
+    }
+
+    // Points the shared accessors at the given plugin instance. On the dedicated server the early
+    // bootstrap runs against a stand-in plugin; Init swaps in the live instance via this method
+    // once it exists, so per-tick code reaches the real Tick counter.
+    public static void AttachPlugin(ICommonPlugin plugin)
+    {
+        Plugin = plugin;
+        Logger = plugin.Log;
+        Config = plugin.Config;
     }
 }
