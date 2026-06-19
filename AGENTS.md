@@ -12,4 +12,7 @@ Depending on the plugin, the following skills may also be related and useful:
 
 If any of the above skills are missing, install them from https://github.com/viktor-ferenczi/se-dev-skills
 
-Also, read the project's `README.md` to understand its purpose and context.
+Also, read the project's `README.md` to understand its purpose and context, and
+`Docs/TOC.md` for the full documentation (architecture, the server subsystems, the
+measurement/limiter design, configuration and build). Keep `Docs/` in sync when you change
+the code; regenerate the file-hash manifest with the snippet in `Docs/data/README.md`.

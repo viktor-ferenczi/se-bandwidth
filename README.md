@@ -1,161 +1,64 @@
-# Space Engineers Plugin Template
+# Bandwidth
 
-[Client only version of the template](https://github.com/viktor-ferenczi/se-client-plugin-template)
+A **Space Engineers dedicated-server plugin** ([Magnetar](https://magnetar.se)) that measures
+each connected client's network bandwidth, publishes it as telemetry, and can optionally pace a
+client's outgoing traffic when the link can't keep up.
 
-## Prerequisites
+It is **observe-only and safe by default**. Out of the box it only *measures and publishes* —
+it changes nothing about what the server sends. The pacing limiter is strictly opt-in, only
+ever paces a client *down* (never above stock), and only touches unreliable state-sync traffic,
+so enabling it cannot make delivery worse than vanilla.
 
-- [Space Engineers](https://store.steampowered.com/app/244850/Space_Engineers/)
-- [Python 3.12](https://python.org) (requires 3.12 or newer)
-- [Pulsar](https://github.com/SpaceGT/Pulsar) — plugin loader for Space Engineers (game client)
-- [Magnetar](https://magnetar.se) — the Space Engineers server with plugin support
-- [.NET Framework 4.8.1 Developer Pack](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net481) and
-  [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+## What it does
 
-## Create your plugin project
+- **Per-client measurement** — up/down throughput per connected client, captured at the
+  replication send/receive chokepoints from the very first packet (patches applied before world
+  load).
+- **Capacity estimate** — a BBR-style windowed-max delivery rate per direction (an honest
+  *lower bound* while observe-only).
+- **Telemetry** — a self-describing snapshot published every second under the `"bandwidth"`
+  provider through Magnetar's `PluginSdk.Stats` hub, ready for a consumer such as the
+  [Quasar](https://github.com/viktor-ferenczi/Quasar) agent to turn *"player X is lagging"* into
+  a measurable per-client Network panel. Optional Steam-ID redaction for shared dashboards.
+- **Optional adaptive limiter** — a per-client AIMD controller that derives a per-tick packet
+  budget from an operating-rate target, enforced via a transpiler on `FilterStateSync`. Default
+  **off**; configurable live through Quasar with no restart.
 
-1. Click on **Use this template** (top right corner on GitHub) and follow the wizard to create your repository
-2. Clone your repository to have a local working copy
-3. Run `setup.py`, enter the name of your plugin project in `CapitalizedWords` format
-4. Let `setup.py` auto-detect your install locations or fill them in manually
-5. Open the solution in Visual Studio or Rider
-6. Make a test build, it should deploy the resulting files to their respective target folders (see them in the build log)
-7. Test that the empty plugin can be enabled in Pulsar (client) and Magnetar (server)
-8. Replace the contents of this file with the description of your plugin
-9. Follow the TODO comments in the source code
-10. Look into the source code of other plugins for examples on how to patch the game
+## Installation
 
-You may find the source code of these plugins inspirational:
-- [Performance Improvements](https://github.com/viktor-ferenczi/se-performance-improvements)
-- [Multigrid Projector](https://github.com/viktor-ferenczi/se-multigrid-projector)
-- [Toolbar Manager](https://github.com/viktor-ferenczi/se-toolbar-manager)
+This is a server plugin loaded by **Magnetar** on a Space Engineers dedicated server.
 
-In case of questions please feel free to ask the SE plugin developer community on the
-[Pulsar](https://discord.gg/z8ZczP2YZY) Discord server in their relevant text channels. They also have dedicated
-channels for plugin ideas, should you look for a new one.
+- **From source:** install the prerequisites, run `python setup.py` once (auto-detects your
+  Space Engineers / Dedicated Server / Magnetar paths), then build `Bandwidth.sln` in Release.
+  The post-build step deploys `Bandwidth.dll` into your Magnetar local plugin folder. Full
+  steps, prerequisites and deploy details are in **[Docs/Build.md](Docs/Build.md)**.
+- Enable the **Bandwidth** plugin in Magnetar. Measurement starts immediately; configure it
+  (and optionally enable the limiter) via [Quasar](https://github.com/viktor-ferenczi/Quasar)
+  or the `Bandwidth.cfg` file — see **[Docs/Configuration.md](Docs/Configuration.md)**.
 
-_Good luck!_
+> Distribution via [MagnetarHub](https://github.com/viktor-ferenczi/MagnetarHub) is not yet set
+> up: the registration manifests (`BandwidthServer.xml` / `BandwidthClient.xml`) still carry
+> template placeholder metadata. The repository also contains an unmodified `ClientPlugin` from
+> the plugin template; it is **not** part of the bandwidth feature (see
+> [Docs/SharedAndClient.md](Docs/SharedAndClient.md)).
 
-## Remarks
+## Documentation
 
-### Plugin version
+Full documentation is under **[`Docs/`](Docs/TOC.md)**:
 
-The plugin version lives in `Version.Build.props`, which **is** committed and imported by
-`Directory.Build.props`. Keeping the version separate from the local path overrides means it
-is shared by all contributors and stays under version control. Bump the version there.
+| Page | What it covers |
+| --- | --- |
+| [Architecture](Docs/Architecture.md) | The map: projects, subsystems, data flow, threading, safety. **Start here.** |
+| [Server lifecycle](Docs/ServerLifecycle.md) | Startup, the before-world-load bootstrap, config plumbing, the publish loop. |
+| [Measurement](Docs/Measurement.md) | The always-on estimator (`BandwidthMonitor` / `ConnectionTracker` / `DirectionTracker`). |
+| [Limiter](Docs/Limiter.md) | The opt-in AIMD limiter (`RateController` / `BandwidthLimiter`). |
+| [Patches](Docs/Patches.md) | The six Harmony patches and the published stat schemas. |
+| [Configuration](Docs/Configuration.md) | Every admin knob and how config is stored / edited live. |
+| [Build & deploy](Docs/Build.md) | Prerequisites, setup, building, deploying, versioning. |
+| [Shared & client](Docs/SharedAndClient.md) | The `Shared` framework and the template `ClientPlugin`. |
+| [Index](Docs/Index.md) | Flat map of every source file. |
+| [Estimator design](Docs/BandwidthEstimator.md) · [Telemetry contract](Docs/BandwidthTelemetry.md) | The background design documents. |
 
-### Folder path overrides
+## License
 
-`Directory.Build.props.template` is a template for `Directory.Build.props`. The latter is a
-local config file you can use to override the reference folder paths (`Bin64` for the Space
-Engineers client, `Pulsar` and `Magnetar` for the two plugin loaders, and `Dedicated64` for
-the Dedicated Server). It is **not committed** to the repository, so each contributor keeps
-their own local paths.
-
-`setup.py` copies `Directory.Build.props.template` to `Directory.Build.props` if the latter
-does not exist yet, then fills in the auto-detected paths. Because the override is not
-committed, anyone else who clones the repo and runs `setup.py` gets their own
-`Directory.Build.props` with paths properly auto-detected for their machine. Leaving a path
-empty in `Directory.Build.props` falls back to the platform-specific auto-detection further
-down in the same file (Windows and Linux), so the build works on both operating systems.
-
-### Plugin configuration
-
-You can have a nice configuration dialog with little effort in the game client.
-Customize the `Config` class in the `ClientPlugin` project, just follow the examples.
-It supports many different data types, including key binding. Once you have more
-options than can fit on the screen the dialog will have a vertical scrollbar.
-
-![Example config dialog](Docs/ConfigDialogExample.png "Example config dialog")
-
-The server plugin configuration works differently, please see the `Config` folder
-of the `Shared` project for that. The client side `Config` class is not integrated
-with the server side configuration, currently.
-
-### Shared project
-
-- Put any code you can share between the plugin projects into the Shared project.
-  Try to keep the redundancy at the minimum.
-
-- The DLLs required by your Shared code need to be added as a dependency to all the projects,
-  even if some of the code is not used by one of the projects.
-
-- You can delete the projects you don't need. If you want only a single project,
-  then move over what is in the Shared one, then you can delete Shared.
-
-### How to prevent the potential crash after game updates
-
-Please use the `EnsureCode` attribute on patch methods to safely skip loading the plugin
-with an error logged should the code in any of the methods patched would change as part of
-a game update. It is a good way to prevent blaming crashes on your plugin after game updates,
-so your plugin can remain safely enabled (but effectively disabled) until you have a chance
-to release an update for compatibility with the new game version. Please see the examples in
-the `Shared/Patches` folder on how to use this attribute.
-
-The hexadecimal hash code is logged in case of a mismatch, so you can read them from the logs
-for any new method you patch, just leave the string initially empty in the `EnsureCode`
-attribute, then replace with the value from the error log line after you run your plugin
-with the patch for the first time.
-
-On Proton (Linux) this check tends to cause issues, therefore it is automatically skipped
-when the plugin detects it is running under Wine/Proton.
-
-### Debugging
-
-- Always use a debug build if you want to set breakpoints and see variable values.
-- A debug build defines `DEBUG`, so you can add conditional code in `#if DEBUG` blocks.
-- While debugging a specific target unload the other one. It prevents the IDE to be confused.
-- If breakpoints do not "stick" or do not work, then make sure that:
-  - Other projects are unloaded, only the debugged one and Shared are loaded.
-  - Debugger is attached to the running process.
-  - You are debugging the code which is running (no code changes made since the build).
-- Transpiler patches will write a `harmony.log.txt` file to your `Desktop` while running `Debug`
-  builds. Never release a debug build to your users, because that would litter their desktop
-  as well.
-- To debug transpiler changes to the IL code it is most practical to generate the files
-  of the method's IL code before and after the change made, so you can just diff them.
-  Please see the transpiler example under the `Shared/Patches` folder for the details.
-
-### Accessing internal, protected and private members in game code
-
-Enable the Krafs publicizer to significantly reduce the amount of reflections you need to write.
-
-This can be done by systematically uncommenting the code sections marked with "Uncomment to enable publicizer support".
-Make sure not to miss any of those. List the game assemblies you need to publicize in `GameAssembliesToPublicize.cs`. 
-In case of problems read about the [Krafs Publicizer](https://github.com/krafs/Publicizer) or reach out on the [Pulsar](https://discord.gg/z8ZczP2YZY) Discord server.
-
-### AI assisted plugin development
-
-Please consider using [se-dev-skills](https://github.com/viktor-ferenczi/se-dev-skills/) for better outcomes.
-
-### Troubleshooting
-
-- If the IDE looks confused, then restarting it and the debugged game usually works.
-- If the restart did not work, then try to delete caches used by your IDE and restart.
-- If your build cannot deploy (just runs in a loop), then something locks the DLL file.
-- Look for running game processes (maybe stuck running in the background) and kill them.
-
-### Release
-
-- Always make your final release from a RELEASE build. (More optimized, removes debug code.)
-- Always test your RELEASE build before publishing. Sometimes it behaves differently.
-- In case of client plugins the Pulsar compiles your code, watch out for differences.
-
-### Publishing your plugin
-
-- Register **client** plugins into [PluginHub](https://github.com/StarCpt/PluginHub/),
-  so they become available in Pulsar.
-- Register **server** plugins into [MagnetarHub](https://github.com/viktor-ferenczi/MagnetarHub),
-  so they become available in Magnetar.
-
-### Communication
-
-- In your documentation always include how players or server admins should report bugs.
-- Try to be reachable and respond on a timely manner over your communication channels.
-- Be open for constructive critics.
-
-### Abandoning your project
-
-- Always consider finding a new maintainer, ask around at least once.
-- If you ever abandon the project, then make it clear on its GitHub page.
-- Abandoned projects should be made hidden on PluginHub and MagnetarHub.
-- Keep the code available on GitHub, so it can be forked and continued by others.
+See [LICENSE](LICENSE).
