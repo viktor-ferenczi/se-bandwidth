@@ -206,10 +206,14 @@ public class Plugin : IPlugin, ICommonPlugin
         if (config == null)
             return;
 
-        BandwidthMonitor.Configure(config.Enabled, config.PublishIntervalMs, config.WindowSize, config.RedactClientId);
+        BandwidthMonitor.Configure(
+            config.Enabled, config.PublishIntervalMs, config.WindowSize, config.RedactClientId,
+            config.LimiterMode,
+            config.RateFloorBytesPerSec, config.RateMaxBytesPerSec, config.RatePriorBytesPerSec,
+            config.AimdIncreaseBytesPerSec2, config.AimdDecreaseFactor, config.StallBackoffFraction);
 
-        if (config.LimiterMode != BandwidthLimiterMode.Off)
-            SdkLog.Warning($"LimiterMode={config.LimiterMode} is reserved; this build is observe-only and never paces outgoing traffic.");
+        if (config.LimiterMode == BandwidthLimiterMode.TokenBucket)
+            SdkLog.Warning("LimiterMode=TokenBucket is not implemented; falling back to the PacketBudget (adaptive AIMD) limiter.");
     }
 
     // Lightweight ICommonPlugin used before the real plugin instance is available, so the shared

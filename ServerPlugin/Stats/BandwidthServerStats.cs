@@ -23,8 +23,8 @@ public sealed class BandwidthServerStats
     [Discrete("Replication tick rate", Unit = "Hz", OverTime = TimeAggregation.Last)]
     public int TickRateHz { get; set; }
 
-    /// <summary>Whether outgoing pacing is currently enforced. Always false in this
-    /// observe-only build; published so a consumer can tell measurement from pacing.</summary>
+    /// <summary>Whether outgoing pacing is currently enforced (an opt-in <c>LimiterMode</c> active on
+    /// the enabled plugin). Published so a consumer can tell measurement from pacing.</summary>
     [Discrete("Outgoing pacing currently enforced", OverTime = TimeAggregation.Last)]
     public bool LimiterActive { get; set; }
 }

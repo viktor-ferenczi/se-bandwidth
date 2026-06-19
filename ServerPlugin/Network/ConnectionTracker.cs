@@ -18,17 +18,23 @@ internal sealed class ConnectionTracker
         Epoch = epoch;
         Down = new DirectionTracker(windowSize);
         Up = new DirectionTracker(windowSize);
+        Control = new RateController();
         connectedAtTicks = Stopwatch.GetTimestamp();
     }
 
     public ulong SteamId { get; }
     public uint Epoch { get; }
 
-    /// <summary>Server → client (the direction the limiter will eventually pace).</summary>
+    /// <summary>Server → client (the direction the limiter paces).</summary>
     public DirectionTracker Down { get; }
 
     /// <summary>Client → server (diagnostic only; never paced).</summary>
     public DirectionTracker Up { get; }
+
+    /// <summary>The downlink AIMD operating-rate controller for this connection. Fed the ACK-stall
+    /// signal by the <c>IsAckAvailable</c> postfix and stepped once per publish interval; its
+    /// <see cref="RateController.TargetBytesPerSec"/> drives the per-tick packet budget.</summary>
+    public RateController Control { get; }
 
     /// <summary>Set when the connection closes; the entry is then dropped from the
     /// live registry.</summary>

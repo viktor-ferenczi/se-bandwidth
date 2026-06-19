@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using PluginSdk.Stats;
+using ServerPlugin.Config;
 using ServerPlugin.Stats;
 using Shared.Plugin;
 
@@ -50,23 +51,49 @@ internal static class BandwidthMonitor
     private static int publishIntervalMs = 1000;
     private static int windowSize = 8;
     private static bool redactClientId;
+    private static BandwidthLimiterMode limiterMode = BandwidthLimiterMode.Off;
 
     private static long lastPublishTicks = Stopwatch.GetTimestamp();
 
     /// <summary>Apply host configuration. Called at startup before any client
     /// connects, and again whenever the live config changes (so enable/disable and
     /// the tuning parameters take effect at runtime). Disabling clears the published
-    /// telemetry so a consumer sees the provider go quiet.</summary>
-    public static void Configure(bool enabled, int publishIntervalMs, int windowSize, bool redactClientId)
+    /// telemetry so a consumer sees the provider go quiet, and forces the limiter off.</summary>
+    public static void Configure(
+        bool enabled, int publishIntervalMs, int windowSize, bool redactClientId,
+        BandwidthLimiterMode limiterMode,
+        double rateFloorBytesPerSec, double rateMaxBytesPerSec, double ratePriorBytesPerSec,
+        double aimdIncreaseBytesPerSec2, double aimdDecreaseFactor, double stallBackoffFraction)
     {
         BandwidthMonitor.enabled = enabled;
         BandwidthMonitor.publishIntervalMs = publishIntervalMs > 0 ? publishIntervalMs : 1000;
         BandwidthMonitor.windowSize = windowSize > 0 ? windowSize : 8;
         BandwidthMonitor.redactClientId = redactClientId;
+        BandwidthMonitor.limiterMode = limiterMode;
+
+        // Push the AIMD tunables into the controller statics. Order the bounds so Floor <= Max even
+        // if a misconfiguration inverts them, and keep the decrease factor a true contraction.
+        double floor = rateFloorBytesPerSec > 0.0 ? rateFloorBytesPerSec : 1.0;
+        double max = rateMaxBytesPerSec > floor ? rateMaxBytesPerSec : floor;
+        RateController.Floor = floor;
+        RateController.Max = max;
+        RateController.Prior = Math.Min(max, Math.Max(floor, ratePriorBytesPerSec));
+        RateController.Alpha = aimdIncreaseBytesPerSec2 > 0.0 ? aimdIncreaseBytesPerSec2 : 0.0;
+        RateController.Beta = aimdDecreaseFactor > 0.0 && aimdDecreaseFactor < 1.0 ? aimdDecreaseFactor : 0.85;
+        RateController.StallFraction = stallBackoffFraction > 0.0 ? stallBackoffFraction : 0.2;
+
+        // The limiter only enforces when the plugin is enabled; disabling the plugin disables pacing
+        // regardless of the configured mode, so replication returns to byte-for-byte stock.
+        BandwidthLimiter.Configure(enabled ? limiterMode : BandwidthLimiterMode.Off);
 
         if (!enabled)
             PluginStats.Clear(ProviderName);
     }
+
+    /// <summary>Look up a live connection by Steam ID. Used by the limiter and the ACK-stall
+    /// postfix on their hot paths.</summary>
+    internal static bool TryGetConnection(ulong steamId, out ConnectionTracker connection)
+        => Live.TryGetValue(steamId, out connection);
 
     // ---- hot paths (callable from any thread) ----
 
@@ -142,6 +169,10 @@ internal static class BandwidthMonitor
             connection.Down.Sample(dtSeconds);
             connection.Up.Sample(dtSeconds);
 
+            // Step the downlink AIMD controller over the same interval. It runs even when pacing is
+            // off, so the published target/budget are a live preview of what the limiter would do.
+            connection.Control.Update(connection.Down.AchievedBytesPerSec, dtSeconds);
+
             clientStats.Add(new BandwidthClientStats
             {
                 Client = FormatClientLabel(connection.SteamId),
@@ -152,6 +183,8 @@ internal static class BandwidthMonitor
                 DownConfidence = connection.Down.Confidence,
                 UpBytesPerSec = connection.Up.AchievedBytesPerSec,
                 UpEstimateBytesPerSec = connection.Up.EstimateBytesPerSec,
+                TargetBytesPerSec = connection.Control.TargetBytesPerSec,
+                PacketBudget = BandwidthLimiter.BudgetFromTarget(connection.Control.TargetBytesPerSec),
             });
         }
 
@@ -162,8 +195,8 @@ internal static class BandwidthMonitor
                 Scope = "server",
                 ClientCount = clientStats.Count,
                 TickRateHz = TickRateHz,
-                // Observe-only build: outgoing pacing is never enforced.
-                LimiterActive = false,
+                // True when an opt-in pacing mode is active on the enabled plugin.
+                LimiterActive = enabled && limiterMode != BandwidthLimiterMode.Off,
             }
         };
 

@@ -4,24 +4,26 @@ using Shared.Config;
 namespace ServerPlugin.Config;
 
 /// <summary>
-/// Outgoing-traffic pacing strategy. This build implements only <see cref="Off"/>
-/// (observe-only, the safe default — see <c>Docs/BandwidthEstimator.md</c> §12);
-/// the remaining modes are reserved so enabling pacing in a later version does not
-/// change the config schema. The value is stored by member name, so reordering the
-/// enum never breaks an existing config.
+/// Outgoing-traffic pacing strategy. <see cref="Off"/> (the safe default) is observe-only;
+/// <see cref="PacketBudget"/> is the implemented adaptive AIMD limiter (Phase 2,
+/// <c>Docs/BandwidthEstimator.md</c> §6.4/§7.2). <see cref="TokenBucket"/> is reserved and
+/// currently falls back to <see cref="PacketBudget"/>. The value is stored by member name, so
+/// reordering the enum never breaks an existing config.
 /// </summary>
 public enum BandwidthLimiterMode
 {
-    /// <summary>No pacing. The server sends exactly as the engine produces.</summary>
+    /// <summary>No pacing. The server sends exactly as the engine produces (observe-only).</summary>
     [EnumCaption("Off (observe-only)")]
     Off,
 
-    /// <summary>Reserved: per-tick byte budget (not implemented in this build).</summary>
-    [EnumCaption("Packet budget (reserved)")]
+    /// <summary>Adaptive AIMD per-client packet budget (the §7.2 O2 limiter). Paces only unreliable
+    /// state sync, never above the stock budget.</summary>
+    [EnumCaption("Packet budget (adaptive AIMD)")]
     PacketBudget,
 
-    /// <summary>Reserved: token-bucket pacing (not implemented in this build).</summary>
-    [EnumCaption("Token bucket (reserved)")]
+    /// <summary>Reserved: token-bucket pacing. Not yet implemented; falls back to
+    /// <see cref="PacketBudget"/>.</summary>
+    [EnumCaption("Token bucket (reserved → packet budget)")]
     TokenBucket,
 }
 
@@ -72,9 +74,43 @@ public class BandwidthConfig : PluginSdk.Config.PluginConfig, IPluginConfig
     [BoolOption("Redact client Steam IDs in telemetry (publish a stable anonymous hash instead)", Parent = "core")]
     public bool RedactClientId { get; set => SetField(ref field, value); } = false;
 
-    /// <summary>Outgoing pacing strategy. This build honours only
-    /// <see cref="BandwidthLimiterMode.Off"/>; the estimator never changes what the
-    /// server sends regardless of this value. Reserved for a future pacing release.</summary>
-    [EnumOption("Outgoing pacing strategy (reserved; this build is observe-only and never paces traffic)", Parent = "core")]
+    /// <summary>Outgoing pacing strategy. <see cref="BandwidthLimiterMode.Off"/> (default) never
+    /// changes what the server sends; <see cref="BandwidthLimiterMode.PacketBudget"/> enables the
+    /// adaptive AIMD limiter. The limiter only ever paces a client down (never above the stock
+    /// budget) and only unreliable state sync, so enabling it cannot make delivery worse than
+    /// stock.</summary>
+    [EnumOption("Outgoing pacing strategy (Off = observe-only; Packet budget = adaptive AIMD limiter)", Parent = "core")]
     public BandwidthLimiterMode LimiterMode { get; set => SetField(ref field, value); } = BandwidthLimiterMode.Off;
+
+    /// <summary>AIMD lower bound on the per-client operating target (R_min, bytes/sec). The packet
+    /// budget never falls below 1 regardless, so this bounds the worst-case pacing of a stalling
+    /// client.</summary>
+    [DoubleOption(1024.0, 16777216.0, description: "Limiter: minimum operating target rate (R_min), bytes/sec")]
+    public double RateFloorBytesPerSec { get; set => SetField(ref field, value); } = 32768.0;
+
+    /// <summary>AIMD upper bound on the per-client operating target (R_max, bytes/sec). At or above
+    /// this the packet budget clamps to the stock 7, so an unconstrained client behaves as
+    /// stock.</summary>
+    [DoubleOption(1024.0, 16777216.0, description: "Limiter: maximum operating target rate (R_max), bytes/sec")]
+    public double RateMaxBytesPerSec { get; set => SetField(ref field, value); } = 524288.0;
+
+    /// <summary>Initial operating target (R_target, bytes/sec) for a freshly connected client, before
+    /// the controller has adapted.</summary>
+    [DoubleOption(1024.0, 16777216.0, description: "Limiter: initial operating target rate for a new connection, bytes/sec")]
+    public double RatePriorBytesPerSec { get; set => SetField(ref field, value); } = 262144.0;
+
+    /// <summary>AIMD additive-increase rate (bytes/sec gained per second of elapsed time) used to
+    /// probe upward when no overuse is detected.</summary>
+    [DoubleOption(0.0, 16777216.0, description: "Limiter: AIMD additive increase, bytes/sec per second")]
+    public double AimdIncreaseBytesPerSec2 { get; set => SetField(ref field, value); } = 65536.0;
+
+    /// <summary>AIMD multiplicative-decrease factor in (0, 1) applied to the operating target on
+    /// sustained overuse (e.g. 0.85 backs off 15% per stalled window).</summary>
+    [DoubleOption(0.05, 0.99, description: "Limiter: AIMD multiplicative decrease factor (0..1)")]
+    public double AimdDecreaseFactor { get; set => SetField(ref field, value); } = 0.85;
+
+    /// <summary>Fraction of serviced ticks in a window that must stall (ACK window exhausted) before
+    /// the controller treats the window as overuse and backs off.</summary>
+    [DoubleOption(0.01, 1.0, description: "Limiter: stall fraction that triggers AIMD back-off (0..1)")]
+    public double StallBackoffFraction { get; set => SetField(ref field, value); } = 0.2;
 }

@@ -7,19 +7,27 @@ The estimate is later used to **pace outgoing replication traffic to each client
 so the server uses as much of the link as is available *without* causing the
 latency spikes that come from over-feeding a client's connection.
 
-> Status: **Phase 1 (observe-only) is implemented** in this plugin; the limiter
-> phases are not. This document fixes the data-flow, the math, the integration
-> points in the SE replication layer, and the candidate throttling mechanisms so
-> the remaining phases can proceed in well-scoped steps.
+> Status: **Phase 1 (observe-only) and a first real limiter (Phase 2) are
+> implemented.** This document fixes the data-flow, the math, the integration
+> points in the SE replication layer, and the candidate throttling mechanisms; the
+> shipped limiter is a deliberately reduced subset of the full §6 design.
 >
-> What ships today (§12 phase 1): the four capture patches under
+> What ships today: the capture patches under
 > [`ServerPlugin/Patches/`](../ServerPlugin/Patches), a per-connection registry
 > keyed as in §5, a **BBR-style windowed-max** delivery-rate estimate per
 > direction (§6.7 — *not* the Kalman fusion of §6.2–6.4, which remains a design
-> alternative), and per-client telemetry published through the Magnetar PluginSdk
-> Stats API (see [`BandwidthTelemetry.md`](BandwidthTelemetry.md)). The estimator
-> never paces traffic: `LimiterMode` exists in config but every mode is a no-op in
-> this build.
+> alternative), per-client telemetry through the Magnetar PluginSdk Stats API (see
+> [`BandwidthTelemetry.md`](BandwidthTelemetry.md)), and an **opt-in adaptive limiter**:
+> the §6.4 AIMD operating-rate controller driving the §7.2 O2 dynamic per-client
+> packet budget.
+>
+> **Deltas vs the full design** (intentional, scoped): the controller uses the
+> **ACK-window stall** (`MyClient.IsAckAvailable()` returning false) as its overuse
+> signal — there is **no delay-gradient Kalman filter** (§6.2), no explicit probe
+> state machine (the additive increase *is* the probe), and no Steam-session polling.
+> The control cadence equals the publish interval (§4) rather than per-ACK. Enforcement
+> is **deferral-only** — no unreliable dropping (§7.7 step 3). `LimiterMode = Off` is
+> the default, so the estimator never paces traffic unless an admin opts in.
 
 ---
 
@@ -642,17 +650,20 @@ patches on the send loop. Nothing here needs client-side changes.
 per 0.5 s per client).
 
 **Failure isolation.** Every hook wraps its body in try/catch and logs via the
-plugin's `Common.Logger`, so a bug in estimation can never break replication — on
-any exception the capture is skipped and SE's stock behavior is unaffected
-(observe-only; the limiter that would otherwise fall back to the fixed 7-packet
-budget is not active in this build).
+plugin's `Common.Logger`, so a bug in estimation or pacing can never break
+replication — on any exception the capture is skipped, and the limiter's packet-budget
+hook returns the stock 7 on any error (and is a no-op transpiler when `LimiterMode = Off`),
+so SE's stock behavior is unaffected.
 
 ---
 
 ## 9. Configuration
 
 Expose through a `PluginConfig`-derived class (Magnetar's standard config
-mechanism, remotely manageable via Quasar). Suggested knobs with defaults:
+mechanism, remotely manageable via Quasar). The table below is the **full design's**
+suggested knob set; the **as-built** config (the subset this build implements, with
+`LimiterMode` defaulting to `Off`) is documented in
+[`BandwidthTelemetry.md`](BandwidthTelemetry.md) §4. Suggested knobs with defaults:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -681,10 +692,11 @@ worse than stock), and aggressive tuning opt-in.
 - **Per-client snapshot** (published each interval). The full design snapshot is
   `R_target`, `Ĉ_down`, `Ĉ_up`, confidence, current RTT/ping, `BytesQueuedForSend`,
   `UsingRelay`, detector state, bytes sent/acked last second, `DirtyQueue` depth,
-  defer count, unreliable-drop count (§7.7 step 3). **This observe-only build
-  publishes the subset it actually measures** — per-direction achieved throughput,
-  the windowed-max capacity estimate, confidence, and connection facts — through
-  the **Magnetar PluginSdk Stats API** under the `bandwidth` provider. The exact
+  defer count, unreliable-drop count (§7.7 step 3). **This build publishes the subset
+  it actually produces** — per-direction achieved throughput, the windowed-max capacity
+  estimate, confidence, connection facts, and (Phase 2) the limiter's operating target
+  and packet budget — through the **Magnetar PluginSdk Stats API** under the `bandwidth`
+  provider. The exact
   contract (stat groups, fields, units) and how a consumer such as the Quasar Agent
   reads it are in **[BandwidthTelemetry.md](BandwidthTelemetry.md)**. Magnetar's
   structured logging (`Logger`/`QuasarLogSink`) remains a secondary, human-readable
@@ -725,11 +737,13 @@ worse than stock), and aggressive tuning opt-in.
 
 ## 12. Phased implementation plan
 
-1. **Observe-only.** Registry + keying (§5) + capture hooks S1–S6, Filters 1 & 2,
-   controller computing `R_target` but **not enforcing**. Ship telemetry (§10).
-   Validate convergence on shaped links. *No behavior change.*
-2. **Limiter (minimal).** O2 dynamic packet budget gated by §7.7 defer policy,
-   behind `LimiterMode`. A/B vs stock. Tune defaults.
+1. **Observe-only.** ✅ *Implemented.* Registry + keying (§5) + capture hooks,
+   windowed-max delivery-rate estimate (§6.7). Telemetry shipped (§10). *No behavior
+   change.*
+2. **Limiter (minimal).** ✅ *Implemented (opt-in, default off).* O2 dynamic packet
+   budget driven by the §6.4 AIMD controller, with the ACK-window stall as the overuse
+   signal (in place of the §6.2 Kalman delay filter), gated by §7.7 deferral. Behind
+   `LimiterMode = PacketBudget`. Deferral-only — no unreliable dropping.
 3. **Limiter (smooth).** O1 token bucket + O4 join pacing.
 4. **Adaptive LOD.** O3 per-client interval scaling for persistent over-budget.
 5. **(Optional) Raise ceiling.** Estimate-driven ACK-window widening (§7.6) for
@@ -750,6 +764,10 @@ Each phase is independently shippable and reversible via config.
 - **Plugin capture patches:** [`ServerPlugin/Patches/`](../ServerPlugin/Patches)
   — `Patch_NetworkWriterSendPacket` (down), `Patch_TransportLayerProcessMessage`
   (up), `Patch_ReplicationAddClient` / `Patch_ReplicationClientLeft` (lifecycle).
+- **Plugin limiter (Phase 2):** `Patch_FilterStateSyncBudget` (O2 budget transpiler
+  on `MyReplicationServer.FilterStateSync`), `Patch_ClientAckAvailable` (ACK-stall
+  signal postfix), `ServerPlugin/Network/RateController.cs` (AIMD controller),
+  `ServerPlugin/Network/BandwidthLimiter.cs` (budget façade).
 - **Google Congestion Control** (delay-based Kalman estimator + adaptive overuse
   detector + AIMD), Holmer et al. — the model Filter 1 + §6.2/§6.4 are adapted
   from. The newer libwebrtc "trendline" variant is a drop-in alternative to the

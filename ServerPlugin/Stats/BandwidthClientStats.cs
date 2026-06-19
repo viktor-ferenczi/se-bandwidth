@@ -50,4 +50,16 @@ public sealed class BandwidthClientStats
     /// not summed across instances; the longest-lived value is kept over time.</summary>
     [Gauge("Connection age", Unit = "s", AcrossInstances = StatAggregation.None, OverTime = TimeAggregation.Max)]
     public double ConnectedSeconds { get; set; }
+
+    /// <summary>Server → client AIMD operating target (R_target, bytes/sec). The limiter derives the
+    /// per-tick packet budget from this; it is tracked even when pacing is off, as a preview. Sums
+    /// across clients to the server's total targeted downlink.</summary>
+    [Gauge("Limiter operating target rate", Unit = "B/s")]
+    public double TargetBytesPerSec { get; set; }
+
+    /// <summary>Per-replication-tick unreliable state-sync packet budget the limiter would enforce
+    /// for this client (1..7; 7 is stock). A discrete control level, carried as its mean over the
+    /// bucket and not summed across clients.</summary>
+    [Discrete("Limiter packet budget per replication tick (1..7; 7 = stock)", OverTime = TimeAggregation.Mean)]
+    public int PacketBudget { get; set; }
 }

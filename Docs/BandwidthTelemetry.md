@@ -5,10 +5,12 @@ How this plugin surfaces its per-client bandwidth measurements to a consumer
 specific player is lagging* — a constrained downlink, a low-confidence estimate,
 a long-lived connection on a small pipe.
 
-> Status: **implemented, observe-only.** The plugin only *measures and publishes*;
-> it never paces traffic. The numbers reflect what the server actually sent and
-> received — see [`BandwidthEstimator.md`](BandwidthEstimator.md) for the estimator
-> and its (future) limiter phases.
+> Status: **measurement always on; limiter implemented and opt-in.** The plugin always
+> *measures and publishes*; it paces traffic only when an admin sets `LimiterMode` to a
+> pacing mode (default `Off`). With the limiter off the numbers reflect what the server
+> actually sent and received, unchanged; with it on, the per-client target/budget columns
+> show the adaptive AIMD limiter at work — see [`BandwidthEstimator.md`](BandwidthEstimator.md)
+> for the estimator and the limiter (Phase 2: §6.4 AIMD + §7.2 O2 packet budget).
 
 The earlier `BandwidthTelemetrySdk.md` proposed a bespoke
 `PluginSdk.Network.BandwidthStats` façade with bandwidth-specific DTOs. That was
@@ -85,7 +87,7 @@ one `StatsSnapshot` carrying **two groups**:
 | *(label)* | — | — | — | — | always `"server"` |
 | `ClientCount` | gauge | — | Sum | Mean | connected clients in this snapshot |
 | `TickRateHz` | discrete | Hz | None | Last | replication tick rate (~60) |
-| `LimiterActive` | discrete | — | None | Last | outgoing pacing enforced — **always `0` in this observe-only build** |
+| `LimiterActive` | discrete | — | None | Last | outgoing pacing enforced — `1` when an opt-in `LimiterMode` is active on the enabled plugin, else `0` |
 
 ### 2.2 `BandwidthClientStats` — one instance per connected client
 
@@ -103,14 +105,17 @@ row distinguished by `ConnectionEpoch`, so a consumer keys a time series on
 | `UpBytesPerSec` | gauge | B/s | Sum | Mean | client → server measured throughput last interval |
 | `UpEstimateBytesPerSec` | gauge | B/s | Sum | Mean | client → server windowed-max capacity estimate |
 | `ConnectedSeconds` | gauge | s | **None** | **Max** | seconds since this connection opened |
+| `TargetBytesPerSec` | gauge | B/s | Sum | Mean | limiter operating target (`R_target`); tracked even when pacing is off, as a preview |
+| `PacketBudget` | discrete | — | None | Mean | per-tick unreliable state-sync packet budget the limiter would enforce (1..7; 7 = stock) |
 
 Per-client rate gauges default to `Sum` across instances, so a consumer that sums
 a column gets the server total (e.g. total downlink). `DownConfidence` is averaged
 rather than summed; `ConnectedSeconds` is per-connection and neither summed nor
-averaged (kept as the max over the bucket). These are the eight scalars the
-observe-only build actually measures — the larger design snapshot (target rate,
-detector state, queue depth, defer/drop counts) in `BandwidthEstimator.md` §10
-arrives with the later limiter phases.
+averaged (kept as the max over the bucket). `TargetBytesPerSec` and `PacketBudget`
+are the limiter's controlled outputs (Phase 2); the remaining design columns (delay
+detector state, queue depth, defer/drop counts) in `BandwidthEstimator.md` §10 are
+not produced by this build — it has no Kalman detector, paces by deferral only, and
+drops nothing.
 
 ---
 
@@ -149,7 +154,17 @@ arrives with the later limiter phases.
 | `PublishIntervalMs` | `1000` | Publish / rate-sampling interval (ms). |
 | `WindowSize` | `8` | Windowed-max length, in publish intervals. |
 | `RedactClientId` | `false` | Publish `anon-<hash>` instead of the Steam ID. |
-| `LimiterMode` | `Off` | Reserved; every mode is a no-op in this observe-only build. |
+| `LimiterMode` | `Off` | Pacing strategy. `Off` = observe-only; `PacketBudget` = adaptive AIMD limiter; `TokenBucket` = reserved (falls back to `PacketBudget`). |
+| `RateFloorBytesPerSec` | `32768` | AIMD lower bound on the operating target (`R_min`). |
+| `RateMaxBytesPerSec` | `524288` | AIMD upper bound (`R_max`); at/above it the budget is the stock 7. |
+| `RatePriorBytesPerSec` | `262144` | Initial operating target for a freshly connected client. |
+| `AimdIncreaseBytesPerSec2` | `65536` | Additive increase, bytes/sec gained per second of elapsed time. |
+| `AimdDecreaseFactor` | `0.85` | Multiplicative decrease factor applied on sustained overuse. |
+| `StallBackoffFraction` | `0.2` | Fraction of serviced ticks that must stall before backing off. |
+
+The limiter is **opt-in and safe by construction**: the budget is `clamp(round((R_target/60)/MTU), 1, 7)`,
+so it never exceeds the stock 7, and only unreliable state sync is capped — reliable and
+streaming traffic are untouched. With `LimiterMode = Off` the server sends byte-for-byte stock.
 
 ---
 
@@ -196,8 +211,9 @@ sample, turns "player X says they lag" into something measurable:
 Sort by the smallest down estimate to surface who the server is struggling to
 feed; expand a row into estimate/achieved/confidence sparklines to tell a steady
 cap from transient congestion; correlate with the plugin-log panel for the same
-player/time. When the limiter phases land, the same panel gains the target-rate,
-queue-depth and drop columns from `BandwidthEstimator.md` §10.
+player/time. With the limiter enabled the same panel gains the `TargetBytesPerSec`
+and `PacketBudget` columns, so an admin can watch a stalling client's budget drop and
+recover as the AIMD controller down-regulates it.
 
 ---
 
@@ -208,6 +224,11 @@ queue-depth and drop columns from `BandwidthEstimator.md` §10.
   telemetry/validation plan §10, phasing §12).
 - `ServerPlugin/Network/BandwidthMonitor.cs` — the producer (`Publish`,
   `Configure`, `FormatClientLabel`).
+- `ServerPlugin/Network/RateController.cs` — the per-client AIMD operating-rate
+  controller; `ServerPlugin/Network/BandwidthLimiter.cs` — the packet-budget façade
+  the transpiler calls.
+- `ServerPlugin/Patches/Patch_FilterStateSyncBudget.cs` (the O2 budget transpiler),
+  `ServerPlugin/Patches/Patch_ClientAckAvailable.cs` (the ACK-stall signal postfix).
 - `ServerPlugin/Stats/BandwidthServerStats.cs`,
   `ServerPlugin/Stats/BandwidthClientStats.cs` — the published stat schemas.
 - `PluginSdk/Stats/` (in the Magnetar repo) — the generic transport:
